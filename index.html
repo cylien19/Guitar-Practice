@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Guitar Practice</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f172a; font-family: 'Helvetica Neue', Arial, sans-serif; }
+    button { cursor: pointer; }
+    ::-webkit-scrollbar { height: 6px; width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+/* ═══════════════════════════ DATA ═══════════════════════════════ */
+
+const NOTES            = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MAJOR_INTERVALS  = [0,2,4,5,7,9,11];
+const STRING_TUNINGS   = [4,9,2,7,11,4];   // E A D G B e  (C=0)
+const STRING_NAMES     = ['E','A','D','G','B','e'];
+
+// Diatonic chord types per degree
+const CHORD_TYPES_TRIAD = ['maj','min','min','maj','maj','min','dim'];
+const CHORD_TYPES_7TH   = ['maj7','min7','min7','maj7','dom7','min7','hdim'];
+
+// Roman numeral degree labels
+const DEGREES_TRIAD = ['I','ii','iii','IV','V','vi','vii°'];
+const DEGREES_7TH   = ['Imaj7','iim7','iiim7','IVmaj7','V7','vim7','viim7♭5'];
+
+const SCALES = {
+  'Pentatonique mineure':    { intervals:[0,3,5,7,10],     desc:'Rock, blues — la plus polyvalente' },
+  'Pentatonique majeure':    { intervals:[0,2,4,7,9],      desc:'Country, pop — sonorité lumineuse' },
+  'Blues':                   { intervals:[0,3,5,6,7,10],   desc:'Pentatonique mineure + blue note (♭5)' },
+  'Gamme majeure':           { intervals:[0,2,4,5,7,9,11], desc:'Base de la musique occidentale' },
+  'Gamme mineure naturelle': { intervals:[0,2,3,5,7,8,10], desc:'Mélancolique et expressive' },
+  'Dorien':                  { intervals:[0,2,3,5,7,9,10], desc:'Jazz, funk — mineur avec une 6te maj.' },
+  'Mixolydien':              { intervals:[0,2,4,5,7,9,10], desc:'Blues-rock — majeur avec une ♭7' },
+};
+
+const PROGRESSIONS = [
+  { name:'Pop',          degrees:[0,4,5,3], label:'I – V – vi – IV' },
+  { name:'Blues / Rock', degrees:[0,3,4,0], label:'I – IV – V – I' },
+  { name:'Jazz  ii–V–I', degrees:[1,4,0],   label:'ii – V – I' },
+  { name:'Années 50',    degrees:[0,5,1,4], label:'I – vi – ii – V' },
+  { name:'Mineur',       degrees:[5,3,0,4], label:'vi – IV – I – V' },
+];
+
+/* ═══════════════════ CHORD LABEL HELPER ════════════════════════ */
+
+function chordLabel(noteName, type) {
+  switch(type) {
+    case 'maj':  return noteName;
+    case 'min':  return noteName + 'm';
+    case 'dim':  return noteName + '°';
+    case 'dom7': return noteName + '7';
+    case 'maj7': return noteName + 'maj7';
+    case 'min7': return noteName + 'm7';
+    case 'hdim': return noteName + 'm7♭5';
+    default: return noteName;
+  }
+}
+
+/* ═══════════════════ SHAPE VOICING ENGINE ══════════════════════
+   Returns { frets:[e,A,D,G,B,e], startFret, barre? }
+   shape = 6 → root on low E string
+   shape = 5 → root on A string
+   shape = 4 → root on D string
+
+   Verified formulas for all types (C=0 semitone reference):
+   ─────────────────────────────────────────────────────────────
+   maj    shape6: [R,R+2,R+2,R+1,R,R]          (E shape)
+   maj    shape5: [x,R,R+2,R+2,R+2,R]           (A shape)
+   maj    shape4: [x,x,R,R+2,R+3,R+2]           (D shape)
+
+   min    shape6: [R,R+2,R+2,R,R,R]             (Em shape)
+   min    shape5: [x,R,R+2,R+2,R+1,R]           (Am shape)
+   min    shape4: [x,x,R,R+2,R+3,R+1]           (Dm shape)
+
+   dom7   shape6: [R,R+2,R,R+1,R,R]             (E7 shape)
+   dom7   shape5: [x,R,R+2,R,R+2,R]             (A7 shape)
+   dom7   shape4: [x,x,R,R+2,R+1,R+2]           (D7 shape)
+
+   maj7   shape6: [R,R+2,R+1,R+1,R,R]           (Emaj7 shape)
+   maj7   shape5: [x,R,R+2,R+1,R+2,R]           (Amaj7 shape)
+   maj7   shape4: [x,x,R,R+2,R+2,R+2]           (Dmaj7 shape)
+
+   min7   shape6: [R,R+2,R,R,R,R]               (Em7 shape)
+   min7   shape5: [x,R,R+2,R,R+1,R]             (Am7 shape)
+   min7   shape4: [x,x,R,R+2,R+1,R+1]           (Dm7 shape)
+
+   hdim   shape6: [R,R+1,R,R,R+3,R+3]           (Em7♭5 shape)
+   hdim   shape5: [x,R,R+1,R,R+1,x]             (Am7♭5 shape)
+   hdim   shape4: [x,x,R,R+1,R+1,R+1]           (Dm7♭5 shape)
+
+   dim    shape6: same as hdim (practical approx.)
+   dim    shape5: [x,R,R+1,R+2,R+1,x]
+   dim    shape4: [x,x,R,R+1,R+3,R+1]           (verified)
+══════════════════════════════════════════════════════════════ */
+
+function getShapeVoicing(noteIdx, type, shape) {
+  const R = shape === 6 ? (noteIdx - 4 + 12) % 12
+          : shape === 5 ? (noteIdx - 9 + 12) % 12
+          :               (noteIdx - 2 + 12) % 12;
+  const barre = R > 0 ? R : null;
+  const sf    = Math.max(1, R);
+
+  switch (type) {
+    case 'maj':
+      if (shape === 6) return { frets:[R,R+2,R+2,R+1,R,R],    startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+2,R+2,R+2,R],   startFret:sf, barre };
+      return                  { frets:[-1,-1,R,R+2,R+3,R+2],  startFret:sf };
+
+    case 'min':
+      if (shape === 6) return { frets:[R,R+2,R+2,R,R,R],      startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+2,R+2,R+1,R],   startFret:sf, barre };
+      return                  { frets:[-1,-1,R,R+2,R+3,R+1],  startFret:sf };
+
+    case 'dom7':
+      if (shape === 6) return { frets:[R,R+2,R,R+1,R,R],      startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+2,R,R+2,R],     startFret:sf, barre };
+      return                  { frets:[-1,-1,R,R+2,R+1,R+2],  startFret:sf };
+
+    case 'maj7':
+      if (shape === 6) return { frets:[R,R+2,R+1,R+1,R,R],    startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+2,R+1,R+2,R],   startFret:sf, barre };
+      return                  { frets:[-1,-1,R,R+2,R+2,R+2],  startFret:sf };
+
+    case 'min7':
+      if (shape === 6) return { frets:[R,R+2,R,R,R,R],        startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+2,R,R+1,R],     startFret:sf, barre };
+      return                  { frets:[-1,-1,R,R+2,R+1,R+1],  startFret:sf };
+
+    case 'hdim':
+      if (shape === 6) return { frets:[R,R+1,R,R,R+3,R+3],    startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+1,R,R+1,-1],    startFret:sf };
+      return                  { frets:[-1,-1,R,R+1,R+1,R+1],  startFret:sf };
+
+    case 'dim':
+      if (shape === 6) return { frets:[R,R+1,R,R,R+3,R+3],    startFret:sf, barre };
+      if (shape === 5) return { frets:[-1,R,R+1,R+2,R+1,-1],  startFret:sf };
+      return                  { frets:[-1,-1,R,R+1,R+3,R+1],  startFret:sf };
+
+    default: return { frets:[0,0,0,0,0,0], startFret:1 };
+  }
+}
+
+/* ═══════════════════ CHORD DIAGRAM SVG ════════════════════════ */
+
+function ChordDiagram({ frets, startFret, barre, label, degree, compact }) {
+  const W  = compact ? 76  : 96;
+  const H  = compact ? 86  : 116;
+  const px = compact ? 11  : 13;
+  const fh = compact ? 12  : 14;
+  const py = compact ? (label ? 26 : 16) : (label ? 36 : 24);
+  const nf = 5;
+  const sw = (W - 2*px) / 5;
+  const firstPlayed = (frets||[]).findIndex(f => f !== -1);
+
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
+      {label && (
+        <text x={W/2} y={compact?11:13} textAnchor="middle"
+          fontSize={compact?10:12} fontWeight="700" fill="#EF9F27" fontFamily="Georgia,serif">
+          {label}
+        </text>
+      )}
+      {degree && !compact && (
+        <text x={W/2} y={24} textAnchor="middle" fontSize="8" fill="#888780">{degree}</text>
+      )}
+
+      {/* Fret position number */}
+      {startFret > 1 && (
+        <text x={px-3} y={py-5} textAnchor="end" fontSize={compact?6:7} fill="#888780">
+          {startFret}fr
+        </text>
+      )}
+
+      {/* Nut */}
+      {startFret === 1 && (
+        <rect x={px} y={py-3} width={5*sw} height={3} fill="#D3D1C7" rx={1}/>
+      )}
+
+      {/* Fret lines */}
+      {Array.from({length:nf+1}, (_,f) => (
+        <line key={f} x1={px} y1={py+f*fh} x2={px+5*sw} y2={py+f*fh}
+          stroke="#444441" strokeWidth={.8}/>
+      ))}
+
+      {/* String lines */}
+      {Array.from({length:6}, (_,s) => (
+        <line key={s} x1={px+s*sw} y1={py} x2={px+s*sw} y2={py+nf*fh}
+          stroke="#5F5E5A" strokeWidth={.7}/>
+      ))}
+
+      {/* Barre bar */}
+      {barre && firstPlayed >= 0 && (
+        <rect
+          x={px + firstPlayed*sw - 5}
+          y={py + (barre-startFret)*fh + fh*.17}
+          width={(5-firstPlayed)*sw + 10}
+          height={fh*.66}
+          rx={fh*.33}
+          fill="#EF9F27" opacity={.92}
+        />
+      )}
+
+      {/* Open / muted / finger dots */}
+      {(frets||[]).map((f, i) => {
+        const x = px + i*sw;
+        if (f === -1) return (
+          <text key={i} x={x} y={py-5} textAnchor="middle"
+            fontSize={compact?8:9} fill="#E24B4A">×</text>
+        );
+        if (f === 0) return (
+          <circle key={i} cx={x} cy={py-8} r={compact?3.5:4.5}
+            fill="none" stroke="#888780" strokeWidth={1.5}/>
+        );
+        const adj = f - startFret;
+        if (adj >= 0 && adj < nf && !(barre && f === barre)) return (
+          <circle key={i} cx={x} cy={py+adj*fh+fh/2} r={compact?4:5.5} fill="#EF9F27"/>
+        );
+        return null;
+      })}
+    </svg>
+  );
+}
+
+/* ═══════════════════ VOICING COLUMN ═══════════════════════════ */
+
+const SHAPE_LABELS = {6:'Corde 6 (mi grave)', 5:'Corde 5 (la)', 4:'Corde 4 (ré)'};
+
+function VoicingColumn({ noteIdx, noteName, type, degree }) {
+  const label = chordLabel(noteName, type);
+  const shapes = [6, 5, 4];
+
+  return (
+    <div style={{display:'flex', flexDirection:'column', alignItems:'center', gap:6, minWidth:90}}>
+      {/* Chord name + degree */}
+      <div style={{textAlign:'center'}}>
+        <div style={{fontSize:10, color:'#888780', letterSpacing:'0.08em', marginBottom:2}}>{degree}</div>
+        <div style={{fontSize:17, fontWeight:700, color:'#EF9F27', fontFamily:"Georgia,serif", lineHeight:1}}>{label}</div>
+      </div>
+
+      {/* 3 voicings */}
+      {shapes.map(shape => {
+        const v = getShapeVoicing(noteIdx, type, shape);
+        return (
+          <div key={shape} style={{
+            background:'#111827', borderRadius:8, padding:'6px 6px 4px',
+            border:'1px solid #1e293b', width:'100%'
+          }}>
+            <div style={{fontSize:8, color:'#5F5E5A', textAlign:'center', marginBottom:3, letterSpacing:'0.05em'}}>
+              {SHAPE_LABELS[shape]}
+            </div>
+            <ChordDiagram {...v} label={label} compact={true}/>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════════ SCALE FRETBOARD ══════════════════════════ */
+
+function ScaleDiagram({ rootIdx, intervals }) {
+  const scaleNotes = useMemo(() => intervals.map(i => (rootIdx+i)%12), [rootIdx, intervals]);
+  const NF=14, FW=31, SH=18, padX=44, padY=14;
+  const W = padX + NF*FW + 8, H = padY + 5*SH + 24;
+
+  const positions = STRING_TUNINGS.map(t =>
+    Array.from({length:NF+1}, (_, fret) => {
+      const note = (t+fret)%12;
+      return scaleNotes.includes(note) ? {fret, isRoot: note===rootIdx} : null;
+    }).filter(Boolean)
+  );
+
+  return (
+    <div style={{overflowX:'auto'}}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
+        {STRING_NAMES.map((n,s) => (
+          <text key={s} x={8} y={padY+s*SH+4} textAnchor="middle" fontSize="8" fill="#888780">{n}</text>
+        ))}
+        <rect x={padX-3} y={padY} width={4} height={5*SH} fill="#B4B2A9" rx={1}/>
+        {Array.from({length:NF+1}, (_,f) => (
+          <line key={f} x1={padX+f*FW} y1={padY} x2={padX+f*FW} y2={padY+5*SH}
+            stroke={f===0?'#5F5E5A':'#2C2C2A'} strokeWidth={1}/>
+        ))}
+        {Array.from({length:6}, (_,s) => (
+          <line key={s} x1={padX} y1={padY+s*SH} x2={padX+NF*FW} y2={padY+s*SH}
+            stroke="#444441" strokeWidth={s===0||s===5?1.5:1}/>
+        ))}
+        {[3,5,7,9].filter(f=>f<=NF).map(f => (
+          <circle key={f} cx={padX+(f-.5)*FW} cy={padY+2.5*SH} r={2} fill="#2C2C2A"/>
+        ))}
+        {NF>=12 && <>
+          <circle cx={padX+11.5*FW} cy={padY+1.5*SH} r={2} fill="#2C2C2A"/>
+          <circle cx={padX+11.5*FW} cy={padY+3.5*SH} r={2} fill="#2C2C2A"/>
+        </>}
+        {[3,5,7,9,12].filter(f=>f<=NF).map(f => (
+          <text key={f} x={padX+(f-.5)*FW} y={padY+5*SH+17} textAnchor="middle"
+            fontSize="8" fill="#5F5E5A">{f}</text>
+        ))}
+        {positions.map((strDots, si) =>
+          strDots.map(({fret, isRoot}) => {
+            const cx = fret===0 ? padX-16 : padX+(fret-.5)*FW;
+            return (
+              <circle key={`${si}-${fret}`} cx={cx} cy={padY+si*SH} r={7}
+                fill={isRoot?'#EF9F27':'#378ADD'} opacity={.88}/>
+            );
+          })
+        )}
+      </svg>
+    </div>
+  );
+}
+
+/* ═══════════════════════ APP ═══════════════════════════════════ */
+
+const BG='#0f172a', CARD='#1e293b', CARD2='#111827', BORDER='#334155';
+const ACCENT='#EF9F27', TEXT='#f1f5f9', MUTED='#888780';
+
+function GuitarApp() {
+  const [key,     setKey]     = useState(0);
+  const [progIdx, setProgIdx] = useState(0);
+  const [scale,   setScale]   = useState('Pentatonique mineure');
+  const [tab,     setTab]     = useState('progressions');
+  const [use7th,  setUse7th]  = useState(false);
+
+  const chordTypes  = use7th ? CHORD_TYPES_7TH  : CHORD_TYPES_TRIAD;
+  const degreeNames = use7th ? DEGREES_7TH       : DEGREES_TRIAD;
+
+  const keyChords = useMemo(() =>
+    MAJOR_INTERVALS.map((interval, i) => ({
+      noteIdx:  (key + interval) % 12,
+      noteName: NOTES[(key + interval) % 12],
+      type:     chordTypes[i],
+      degree:   degreeNames[i],
+    }))
+  , [key, use7th]);
+
+  const prog       = PROGRESSIONS[progIdx];
+  const progChords = prog.degrees.map(d => keyChords[d]);
+
+  // ── shared style helpers ──────────────────────────────────────
+  const pill = active => ({
+    padding:'5px 14px', borderRadius:20, cursor:'pointer', fontFamily:'inherit',
+    border:`1px solid ${active ? ACCENT : BORDER}`,
+    background: active ? 'rgba(239,159,39,.14)' : 'transparent',
+    color: active ? ACCENT : MUTED, fontSize:12, transition:'all .15s',
+  });
+  const keyBtn = active => ({
+    padding:'5px 12px', borderRadius:7, cursor:'pointer', fontFamily:'inherit',
+    border:`1px solid ${active ? ACCENT : BORDER}`,
+    background: active ? ACCENT : 'transparent',
+    color: active ? BG : TEXT, fontWeight: active ? 700 : 400,
+    fontSize:14, transition:'all .15s',
+  });
+  const toggle = active => ({
+    padding:'5px 16px', borderRadius:20, cursor:'pointer', fontFamily:'inherit',
+    border:`1px solid ${active ? '#3b82f6' : BORDER}`,
+    background: active ? 'rgba(59,130,246,.16)' : 'transparent',
+    color: active ? '#60a5fa' : MUTED, fontSize:12, transition:'all .15s',
+  });
+  const sLabel = {fontSize:9, color:MUTED, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:10};
+  const card   = {background:CARD, borderRadius:10, border:`1px solid ${BORDER}`, padding:'14px 18px'};
+
+  return (
+    <div style={{background:BG, minHeight:'100vh', color:TEXT, padding:'20px 16px',
+      fontFamily:"'Helvetica Neue',Arial,sans-serif", maxWidth:980, margin:'0 auto'}}>
+
+      {/* ── Header ──────────────────────────────────────────── */}
+      <div style={{marginBottom:22, paddingBottom:14, borderBottom:`1px solid ${BORDER}`,
+        display:'flex', alignItems:'baseline', gap:12, flexWrap:'wrap'}}>
+        <h1 style={{fontSize:24, fontWeight:700, margin:0,
+          fontFamily:"Georgia,'Times New Roman',serif", color:ACCENT}}>🎸 Guitar Practice</h1>
+        <span style={{fontSize:13, color:MUTED}}>Progressions & gammes</span>
+      </div>
+
+      {/* ── Key selector ────────────────────────────────────── */}
+      <div style={{marginBottom:20}}>
+        <div style={sLabel}>Tonalité</div>
+        <div style={{display:'flex', flexWrap:'wrap', gap:6}}>
+          {NOTES.map((n,i) => (
+            <button key={i} onClick={() => setKey(i)} style={keyBtn(i===key)}>{n}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Tabs ────────────────────────────────────────────── */}
+      <div style={{display:'flex', borderBottom:`1px solid ${BORDER}`, marginBottom:22}}>
+        {[['progressions',"Progressions d'accords"],['gammes','Gammes & solos']].map(([id,label]) => (
+          <button key={id} onClick={() => setTab(id)} style={{
+            padding:'9px 20px', background:'none', border:'none', cursor:'pointer',
+            fontFamily:'inherit', fontSize:13, transition:'all .15s',
+            color: tab===id ? ACCENT : MUTED,
+            borderBottom: `2px solid ${tab===id ? ACCENT : 'transparent'}`,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* ══════════ PROGRESSIONS tab ══════════════════════════ */}
+      {tab === 'progressions' && (
+        <div>
+          {/* Chord type toggle + progression picker */}
+          <div style={{display:'flex', flexWrap:'wrap', gap:10, alignItems:'center', marginBottom:18}}>
+            <div style={{display:'flex', gap:6, alignItems:'center',
+              background:CARD2, borderRadius:20, border:`1px solid ${BORDER}`, padding:'4px 8px'}}>
+              <span style={{fontSize:10, color:MUTED, marginRight:4}}>Accords</span>
+              <button onClick={() => setUse7th(false)} style={toggle(!use7th)}>Triades</button>
+              <button onClick={() => setUse7th(true)}  style={toggle(use7th)}>Accords de 7e</button>
+            </div>
+            <div style={{width:'1px', height:24, background:BORDER}}/>
+            {PROGRESSIONS.map((p,i) => (
+              <button key={i} onClick={() => setProgIdx(i)} style={pill(i===progIdx)}>{p.name}</button>
+            ))}
+          </div>
+
+          {/* Summary card */}
+          <div style={{...card, marginBottom:24}}>
+            <div style={sLabel}>Progression — {NOTES[key]} majeur</div>
+            <div style={{fontFamily:'monospace', fontSize:16, color:TEXT, marginBottom:5}}>{prog.label}</div>
+            <div style={{fontFamily:'monospace', fontSize:15, color:ACCENT}}>
+              {progChords.map(c => chordLabel(c.noteName, c.type)).join('  –  ')}
+            </div>
+          </div>
+
+          {/* Voicing columns (3 positions per chord) */}
+          <div style={sLabel}>Positions sur le manche — root en corde 6, 5 et 4</div>
+          <div style={{display:'flex', flexWrap:'wrap', gap:14, marginBottom:32}}>
+            {progChords.map((c, i) => (
+              <VoicingColumn key={i}
+                noteIdx={c.noteIdx} noteName={c.noteName}
+                type={c.type} degree={c.degree}/>
+            ))}
+          </div>
+
+          {/* All 7 diatonic chords (single voicing each) */}
+          <div style={sLabel}>Tous les accords diatoniques de {NOTES[key]} majeur</div>
+          <div style={{display:'flex', flexWrap:'wrap', gap:10}}>
+            {keyChords.map((c, i) => {
+              const v = getShapeVoicing(c.noteIdx, c.type, 5); // shape 5 as default
+              return (
+                <div key={i} style={{background:CARD2, borderRadius:8, padding:'8px 6px',
+                  border:`1px solid #1e293b`, display:'flex', flexDirection:'column', alignItems:'center', gap:4}}>
+                  <div style={{fontSize:8, color:MUTED, letterSpacing:'0.08em'}}>{c.degree}</div>
+                  <ChordDiagram {...v} label={chordLabel(c.noteName, c.type)}/>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ GAMMES tab ════════════════════════════════ */}
+      {tab === 'gammes' && (
+        <div>
+          <div style={{display:'flex', flexWrap:'wrap', gap:8, marginBottom:18}}>
+            {Object.keys(SCALES).map(sc => (
+              <button key={sc} onClick={() => setScale(sc)} style={pill(sc===scale)}>{sc}</button>
+            ))}
+          </div>
+
+          <div style={{...card, marginBottom:18}}>
+            <div style={sLabel}>Gamme sélectionnée</div>
+            <div style={{fontSize:17, color:TEXT, marginBottom:5}}>{NOTES[key]} {scale}</div>
+            <div style={{fontSize:12, color:MUTED, marginBottom:10}}>{SCALES[scale].desc}</div>
+            <div style={{fontFamily:'monospace', fontSize:13, color:ACCENT}}>
+              {SCALES[scale].intervals.map(i => NOTES[(key+i)%12]).join('  –  ')}
+            </div>
+          </div>
+
+          <div style={{display:'flex', gap:20, marginBottom:12, flexWrap:'wrap'}}>
+            {[['#EF9F27','Root (tonique)'],['#378ADD','Note de la gamme']].map(([color,label]) => (
+              <div key={label} style={{display:'flex', alignItems:'center', gap:7}}>
+                <div style={{width:11, height:11, borderRadius:'50%', background:color, flexShrink:0}}/>
+                <span style={{fontSize:12, color:MUTED}}>{label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{...card, padding:16}}>
+            <ScaleDiagram rootIdx={key} intervals={SCALES[scale].intervals}/>
+          </div>
+
+          <div style={{marginTop:14, background:CARD2, borderRadius:8,
+            border:`1px solid #1e293b`, padding:'13px 16px'}}>
+            <div style={sLabel}>Conseil de pratique</div>
+            <div style={{fontSize:12, color:MUTED, lineHeight:1.75}}>
+              Commence par apprendre un seul "box pattern" avant de connecter les positions.
+              Les roots en orange sont tes points d'ancrage — commence et termine tes phrases
+              sur ces notes pour donner de la cohérence à ton jeu.
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<GuitarApp/>);
+</script>
+</body>
+</html>
