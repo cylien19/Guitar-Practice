@@ -11,6 +11,11 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f172a; font-family: 'Helvetica Neue', Arial, sans-serif; }
     button { cursor: pointer; }
+    input[type=range] { -webkit-appearance: none; appearance: none; height: 4px;
+      border-radius: 2px; background: #334155; outline: none; cursor: pointer; }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+      background: #EF9F27; cursor: pointer; }
     ::-webkit-scrollbar { height: 6px; width: 6px; }
     ::-webkit-scrollbar-track { background: #1e293b; }
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
@@ -19,22 +24,19 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useMemo } = React;
+const { useState, useMemo, useRef, useEffect, useCallback } = React;
 
 /* ═══════════════════════════ DATA ═══════════════════════════════ */
 
-const NOTES            = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-const MAJOR_INTERVALS  = [0,2,4,5,7,9,11];
-const STRING_TUNINGS   = [4,9,2,7,11,4];   // E A D G B e  (C=0)
-const STRING_NAMES     = ['E','A','D','G','B','e'];
+const NOTES           = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MAJOR_INTERVALS = [0,2,4,5,7,9,11];
+const STRING_TUNINGS  = [4,9,2,7,11,4];
+const STRING_NAMES    = ['E','A','D','G','B','e'];
 
-// Diatonic chord types per degree
 const CHORD_TYPES_TRIAD = ['maj','min','min','maj','maj','min','dim'];
 const CHORD_TYPES_7TH   = ['maj7','min7','min7','maj7','dom7','min7','hdim'];
-
-// Roman numeral degree labels
-const DEGREES_TRIAD = ['I','ii','iii','IV','V','vi','vii°'];
-const DEGREES_7TH   = ['Imaj7','iim7','iiim7','IVmaj7','V7','vim7','viim7♭5'];
+const DEGREES_TRIAD     = ['I','ii','iii','IV','V','vi','vii°'];
+const DEGREES_7TH       = ['Imaj7','iim7','iiim7','IVmaj7','V7','vim7','viim7♭5'];
 
 const SCALES = {
   'Pentatonique mineure':    { intervals:[0,3,5,7,10],     desc:'Rock, blues — la plus polyvalente' },
@@ -54,7 +56,15 @@ const PROGRESSIONS = [
   { name:'Mineur',       degrees:[5,3,0,4], label:'vi – IV – I – V' },
 ];
 
-/* ═══════════════════ CHORD LABEL HELPER ════════════════════════ */
+const BEATBOX_PRESETS = {
+  'Rock':   { kick:[1,0,0,0,1,0,0,0], snare:[0,0,1,0,0,0,1,0], hihat:[1,1,1,1,1,1,1,1] },
+  'Bossa':  { kick:[1,0,0,1,0,0,1,0], snare:[0,0,1,0,0,1,0,0], hihat:[1,0,1,0,1,0,1,0] },
+  'Funk':   { kick:[1,0,1,0,0,0,1,0], snare:[0,0,0,0,1,0,0,1], hihat:[1,1,1,1,1,1,1,1] },
+  'Blues':  { kick:[1,0,0,1,0,0,1,0], snare:[0,0,1,0,0,0,1,0], hihat:[1,0,1,1,0,1,1,0] },
+  'Vide':   { kick:[0,0,0,0,0,0,0,0], snare:[0,0,0,0,0,0,0,0], hihat:[0,0,0,0,0,0,0,0] },
+};
+
+/* ═══════════════════ CHORD / SCALE HELPERS ═════════════════════ */
 
 function chordLabel(noteName, type) {
   switch(type) {
@@ -69,165 +79,73 @@ function chordLabel(noteName, type) {
   }
 }
 
-/* ═══════════════════ SHAPE VOICING ENGINE ══════════════════════
-   Returns { frets:[e,A,D,G,B,e], startFret, barre? }
-   shape = 6 → root on low E string
-   shape = 5 → root on A string
-   shape = 4 → root on D string
-
-   Verified formulas for all types (C=0 semitone reference):
-   ─────────────────────────────────────────────────────────────
-   maj    shape6: [R,R+2,R+2,R+1,R,R]          (E shape)
-   maj    shape5: [x,R,R+2,R+2,R+2,R]           (A shape)
-   maj    shape4: [x,x,R,R+2,R+3,R+2]           (D shape)
-
-   min    shape6: [R,R+2,R+2,R,R,R]             (Em shape)
-   min    shape5: [x,R,R+2,R+2,R+1,R]           (Am shape)
-   min    shape4: [x,x,R,R+2,R+3,R+1]           (Dm shape)
-
-   dom7   shape6: [R,R+2,R,R+1,R,R]             (E7 shape)
-   dom7   shape5: [x,R,R+2,R,R+2,R]             (A7 shape)
-   dom7   shape4: [x,x,R,R+2,R+1,R+2]           (D7 shape)
-
-   maj7   shape6: [R,R+2,R+1,R+1,R,R]           (Emaj7 shape)
-   maj7   shape5: [x,R,R+2,R+1,R+2,R]           (Amaj7 shape)
-   maj7   shape4: [x,x,R,R+2,R+2,R+2]           (Dmaj7 shape)
-
-   min7   shape6: [R,R+2,R,R,R,R]               (Em7 shape)
-   min7   shape5: [x,R,R+2,R,R+1,R]             (Am7 shape)
-   min7   shape4: [x,x,R,R+2,R+1,R+1]           (Dm7 shape)
-
-   hdim   shape6: [R,R+1,R,R,R+3,R+3]           (Em7♭5 shape)
-   hdim   shape5: [x,R,R+1,R,R+1,x]             (Am7♭5 shape)
-   hdim   shape4: [x,x,R,R+1,R+1,R+1]           (Dm7♭5 shape)
-
-   dim    shape6: same as hdim (practical approx.)
-   dim    shape5: [x,R,R+1,R+2,R+1,x]
-   dim    shape4: [x,x,R,R+1,R+3,R+1]           (verified)
-══════════════════════════════════════════════════════════════ */
-
 function getShapeVoicing(noteIdx, type, shape) {
-  const R = shape === 6 ? (noteIdx - 4 + 12) % 12
-          : shape === 5 ? (noteIdx - 9 + 12) % 12
-          :               (noteIdx - 2 + 12) % 12;
+  const R = shape === 6 ? (noteIdx-4+12)%12 : shape === 5 ? (noteIdx-9+12)%12 : (noteIdx-2+12)%12;
   const barre = R > 0 ? R : null;
-  const sf    = Math.max(1, R);
-
-  switch (type) {
+  const sf = Math.max(1, R);
+  switch(type) {
     case 'maj':
-      if (shape === 6) return { frets:[R,R+2,R+2,R+1,R,R],    startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+2,R+2,R+2,R],   startFret:sf, barre };
-      return                  { frets:[-1,-1,R,R+2,R+3,R+2],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+2,R+2,R+1,R,R],   startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+2,R+2,R+2,R],  startFret:sf,barre};
+      return               {frets:[-1,-1,R,R+2,R+3,R+2], startFret:sf};
     case 'min':
-      if (shape === 6) return { frets:[R,R+2,R+2,R,R,R],      startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+2,R+2,R+1,R],   startFret:sf, barre };
-      return                  { frets:[-1,-1,R,R+2,R+3,R+1],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+2,R+2,R,R,R],     startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+2,R+2,R+1,R],  startFret:sf,barre};
+      return               {frets:[-1,-1,R,R+2,R+3,R+1], startFret:sf};
     case 'dom7':
-      if (shape === 6) return { frets:[R,R+2,R,R+1,R,R],      startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+2,R,R+2,R],     startFret:sf, barre };
-      return                  { frets:[-1,-1,R,R+2,R+1,R+2],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+2,R,R+1,R,R],     startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+2,R,R+2,R],    startFret:sf,barre};
+      return               {frets:[-1,-1,R,R+2,R+1,R+2], startFret:sf};
     case 'maj7':
-      if (shape === 6) return { frets:[R,R+2,R+1,R+1,R,R],    startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+2,R+1,R+2,R],   startFret:sf, barre };
-      return                  { frets:[-1,-1,R,R+2,R+2,R+2],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+2,R+1,R+1,R,R],   startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+2,R+1,R+2,R],  startFret:sf,barre};
+      return               {frets:[-1,-1,R,R+2,R+2,R+2], startFret:sf};
     case 'min7':
-      if (shape === 6) return { frets:[R,R+2,R,R,R,R],        startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+2,R,R+1,R],     startFret:sf, barre };
-      return                  { frets:[-1,-1,R,R+2,R+1,R+1],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+2,R,R,R,R],       startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+2,R,R+1,R],    startFret:sf,barre};
+      return               {frets:[-1,-1,R,R+2,R+1,R+1], startFret:sf};
     case 'hdim':
-      if (shape === 6) return { frets:[R,R+1,R,R,R+3,R+3],    startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+1,R,R+1,-1],    startFret:sf };
-      return                  { frets:[-1,-1,R,R+1,R+1,R+1],  startFret:sf };
-
+      if(shape===6) return {frets:[R,R+1,R,R,R+3,R+3],   startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+1,R,R+1,-1],   startFret:sf};
+      return               {frets:[-1,-1,R,R+1,R+1,R+1], startFret:sf};
     case 'dim':
-      if (shape === 6) return { frets:[R,R+1,R,R,R+3,R+3],    startFret:sf, barre };
-      if (shape === 5) return { frets:[-1,R,R+1,R+2,R+1,-1],  startFret:sf };
-      return                  { frets:[-1,-1,R,R+1,R+3,R+1],  startFret:sf };
-
-    default: return { frets:[0,0,0,0,0,0], startFret:1 };
+      if(shape===6) return {frets:[R,R+1,R,R,R+3,R+3],   startFret:sf,barre};
+      if(shape===5) return {frets:[-1,R,R+1,R+2,R+1,-1], startFret:sf};
+      return               {frets:[-1,-1,R,R+1,R+3,R+1], startFret:sf};
+    default: return {frets:[0,0,0,0,0,0],startFret:1};
   }
 }
 
-/* ═══════════════════ CHORD DIAGRAM SVG ════════════════════════ */
+/* ═══════════════════ CHORD DIAGRAM ════════════════════════════ */
 
-function ChordDiagram({ frets, startFret, barre, label, degree, compact }) {
-  const W  = compact ? 76  : 96;
-  const H  = compact ? 86  : 116;
-  const px = compact ? 11  : 13;
-  const fh = compact ? 12  : 14;
-  const py = compact ? (label ? 26 : 16) : (label ? 36 : 24);
-  const nf = 5;
-  const sw = (W - 2*px) / 5;
-  const firstPlayed = (frets||[]).findIndex(f => f !== -1);
-
+function ChordDiagram({frets, startFret, barre, label, degree, compact}) {
+  const W=compact?76:96, H=compact?86:116, px=compact?11:13;
+  const fh=compact?12:14, py=compact?(label?26:16):(label?36:24), nf=5;
+  const sw=(W-2*px)/5;
+  const firstPlayed=(frets||[]).findIndex(f=>f!==-1);
   return (
     <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
-      {label && (
-        <text x={W/2} y={compact?11:13} textAnchor="middle"
-          fontSize={compact?10:12} fontWeight="700" fill="#EF9F27" fontFamily="Georgia,serif">
-          {label}
-        </text>
-      )}
-      {degree && !compact && (
-        <text x={W/2} y={24} textAnchor="middle" fontSize="8" fill="#888780">{degree}</text>
-      )}
-
-      {/* Fret position number */}
-      {startFret > 1 && (
-        <text x={px-3} y={py-5} textAnchor="end" fontSize={compact?6:7} fill="#888780">
-          {startFret}fr
-        </text>
-      )}
-
-      {/* Nut */}
-      {startFret === 1 && (
-        <rect x={px} y={py-3} width={5*sw} height={3} fill="#D3D1C7" rx={1}/>
-      )}
-
-      {/* Fret lines */}
-      {Array.from({length:nf+1}, (_,f) => (
-        <line key={f} x1={px} y1={py+f*fh} x2={px+5*sw} y2={py+f*fh}
-          stroke="#444441" strokeWidth={.8}/>
+      {label&&<text x={W/2} y={compact?11:13} textAnchor="middle" fontSize={compact?10:12}
+        fontWeight="700" fill="#EF9F27" fontFamily="Georgia,serif">{label}</text>}
+      {degree&&!compact&&<text x={W/2} y={24} textAnchor="middle" fontSize="8" fill="#888780">{degree}</text>}
+      {startFret>1&&<text x={px-3} y={py-5} textAnchor="end" fontSize={compact?6:7} fill="#888780">{startFret}fr</text>}
+      {startFret===1&&<rect x={px} y={py-3} width={5*sw} height={3} fill="#D3D1C7" rx={1}/>}
+      {Array.from({length:nf+1},(_,f)=>(
+        <line key={f} x1={px} y1={py+f*fh} x2={px+5*sw} y2={py+f*fh} stroke="#444441" strokeWidth={.8}/>
       ))}
-
-      {/* String lines */}
-      {Array.from({length:6}, (_,s) => (
-        <line key={s} x1={px+s*sw} y1={py} x2={px+s*sw} y2={py+nf*fh}
-          stroke="#5F5E5A" strokeWidth={.7}/>
+      {Array.from({length:6},(_,s)=>(
+        <line key={s} x1={px+s*sw} y1={py} x2={px+s*sw} y2={py+nf*fh} stroke="#5F5E5A" strokeWidth={.7}/>
       ))}
-
-      {/* Barre bar */}
-      {barre && firstPlayed >= 0 && (
-        <rect
-          x={px + firstPlayed*sw - 5}
-          y={py + (barre-startFret)*fh + fh*.17}
-          width={(5-firstPlayed)*sw + 10}
-          height={fh*.66}
-          rx={fh*.33}
-          fill="#EF9F27" opacity={.92}
-        />
+      {barre&&firstPlayed>=0&&(
+        <rect x={px+firstPlayed*sw-5} y={py+(barre-startFret)*fh+fh*.17}
+          width={(5-firstPlayed)*sw+10} height={fh*.66} rx={fh*.33} fill="#EF9F27" opacity={.92}/>
       )}
-
-      {/* Open / muted / finger dots */}
-      {(frets||[]).map((f, i) => {
-        const x = px + i*sw;
-        if (f === -1) return (
-          <text key={i} x={x} y={py-5} textAnchor="middle"
-            fontSize={compact?8:9} fill="#E24B4A">×</text>
-        );
-        if (f === 0) return (
-          <circle key={i} cx={x} cy={py-8} r={compact?3.5:4.5}
-            fill="none" stroke="#888780" strokeWidth={1.5}/>
-        );
-        const adj = f - startFret;
-        if (adj >= 0 && adj < nf && !(barre && f === barre)) return (
-          <circle key={i} cx={x} cy={py+adj*fh+fh/2} r={compact?4:5.5} fill="#EF9F27"/>
-        );
+      {(frets||[]).map((f,i)=>{
+        const x=px+i*sw;
+        if(f===-1) return <text key={i} x={x} y={py-5} textAnchor="middle" fontSize={compact?8:9} fill="#E24B4A">×</text>;
+        if(f===0)  return <circle key={i} cx={x} cy={py-8} r={compact?3.5:4.5} fill="none" stroke="#888780" strokeWidth={1.5}/>;
+        const adj=f-startFret;
+        if(adj>=0&&adj<nf&&!(barre&&f===barre)) return <circle key={i} cx={x} cy={py+adj*fh+fh/2} r={compact?4:5.5} fill="#EF9F27"/>;
         return null;
       })}
     </svg>
@@ -236,31 +154,22 @@ function ChordDiagram({ frets, startFret, barre, label, degree, compact }) {
 
 /* ═══════════════════ VOICING COLUMN ═══════════════════════════ */
 
-const SHAPE_LABELS = {6:'Corde 6 (mi grave)', 5:'Corde 5 (la)', 4:'Corde 4 (ré)'};
+const SHAPE_LABELS = {6:'Corde 6 (mi grave)',5:'Corde 5 (la)',4:'Corde 4 (ré)'};
 
-function VoicingColumn({ noteIdx, noteName, type, degree }) {
-  const label = chordLabel(noteName, type);
-  const shapes = [6, 5, 4];
-
+function VoicingColumn({noteIdx, noteName, type, degree}) {
+  const label=chordLabel(noteName,type);
   return (
-    <div style={{display:'flex', flexDirection:'column', alignItems:'center', gap:6, minWidth:90}}>
-      {/* Chord name + degree */}
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:6,minWidth:90}}>
       <div style={{textAlign:'center'}}>
-        <div style={{fontSize:10, color:'#888780', letterSpacing:'0.08em', marginBottom:2}}>{degree}</div>
-        <div style={{fontSize:17, fontWeight:700, color:'#EF9F27', fontFamily:"Georgia,serif", lineHeight:1}}>{label}</div>
+        <div style={{fontSize:10,color:'#888780',letterSpacing:'0.08em',marginBottom:2}}>{degree}</div>
+        <div style={{fontSize:17,fontWeight:700,color:'#EF9F27',fontFamily:"Georgia,serif",lineHeight:1}}>{label}</div>
       </div>
-
-      {/* 3 voicings */}
-      {shapes.map(shape => {
-        const v = getShapeVoicing(noteIdx, type, shape);
+      {[6,5,4].map(shape=>{
+        const v=getShapeVoicing(noteIdx,type,shape);
         return (
-          <div key={shape} style={{
-            background:'#111827', borderRadius:8, padding:'6px 6px 4px',
-            border:'1px solid #1e293b', width:'100%'
-          }}>
-            <div style={{fontSize:8, color:'#5F5E5A', textAlign:'center', marginBottom:3, letterSpacing:'0.05em'}}>
-              {SHAPE_LABELS[shape]}
-            </div>
+          <div key={shape} style={{background:'#111827',borderRadius:8,padding:'6px 6px 4px',
+            border:'1px solid #1e293b',width:'100%'}}>
+            <div style={{fontSize:8,color:'#5F5E5A',textAlign:'center',marginBottom:3}}>{SHAPE_LABELS[shape]}</div>
             <ChordDiagram {...v} label={label} compact={true}/>
           </div>
         );
@@ -271,54 +180,637 @@ function VoicingColumn({ noteIdx, noteName, type, degree }) {
 
 /* ═══════════════════ SCALE FRETBOARD ══════════════════════════ */
 
-function ScaleDiagram({ rootIdx, intervals }) {
-  const scaleNotes = useMemo(() => intervals.map(i => (rootIdx+i)%12), [rootIdx, intervals]);
-  const NF=14, FW=31, SH=18, padX=44, padY=14;
-  const W = padX + NF*FW + 8, H = padY + 5*SH + 24;
-
-  const positions = STRING_TUNINGS.map(t =>
-    Array.from({length:NF+1}, (_, fret) => {
-      const note = (t+fret)%12;
-      return scaleNotes.includes(note) ? {fret, isRoot: note===rootIdx} : null;
+function ScaleDiagram({rootIdx, intervals}) {
+  const scaleNotes=useMemo(()=>intervals.map(i=>(rootIdx+i)%12),[rootIdx,intervals]);
+  const NF=14,FW=31,SH=18,padX=44,padY=14;
+  const W=padX+NF*FW+8,H=padY+5*SH+24;
+  const positions=STRING_TUNINGS.map(t=>
+    Array.from({length:NF+1},(_,fret)=>{
+      const note=(t+fret)%12;
+      return scaleNotes.includes(note)?{fret,isRoot:note===rootIdx}:null;
     }).filter(Boolean)
   );
-
   return (
     <div style={{overflowX:'auto'}}>
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
-        {STRING_NAMES.map((n,s) => (
+        {STRING_NAMES.map((n,s)=>(
           <text key={s} x={8} y={padY+s*SH+4} textAnchor="middle" fontSize="8" fill="#888780">{n}</text>
         ))}
         <rect x={padX-3} y={padY} width={4} height={5*SH} fill="#B4B2A9" rx={1}/>
-        {Array.from({length:NF+1}, (_,f) => (
+        {Array.from({length:NF+1},(_,f)=>(
           <line key={f} x1={padX+f*FW} y1={padY} x2={padX+f*FW} y2={padY+5*SH}
             stroke={f===0?'#5F5E5A':'#2C2C2A'} strokeWidth={1}/>
         ))}
-        {Array.from({length:6}, (_,s) => (
+        {Array.from({length:6},(_,s)=>(
           <line key={s} x1={padX} y1={padY+s*SH} x2={padX+NF*FW} y2={padY+s*SH}
             stroke="#444441" strokeWidth={s===0||s===5?1.5:1}/>
         ))}
-        {[3,5,7,9].filter(f=>f<=NF).map(f => (
+        {[3,5,7,9].filter(f=>f<=NF).map(f=>(
           <circle key={f} cx={padX+(f-.5)*FW} cy={padY+2.5*SH} r={2} fill="#2C2C2A"/>
         ))}
-        {NF>=12 && <>
-          <circle cx={padX+11.5*FW} cy={padY+1.5*SH} r={2} fill="#2C2C2A"/>
-          <circle cx={padX+11.5*FW} cy={padY+3.5*SH} r={2} fill="#2C2C2A"/>
-        </>}
-        {[3,5,7,9,12].filter(f=>f<=NF).map(f => (
-          <text key={f} x={padX+(f-.5)*FW} y={padY+5*SH+17} textAnchor="middle"
-            fontSize="8" fill="#5F5E5A">{f}</text>
+        {NF>=12&&<><circle cx={padX+11.5*FW} cy={padY+1.5*SH} r={2} fill="#2C2C2A"/>
+          <circle cx={padX+11.5*FW} cy={padY+3.5*SH} r={2} fill="#2C2C2A"/></>}
+        {[3,5,7,9,12].filter(f=>f<=NF).map(f=>(
+          <text key={f} x={padX+(f-.5)*FW} y={padY+5*SH+17} textAnchor="middle" fontSize="8" fill="#5F5E5A">{f}</text>
         ))}
-        {positions.map((strDots, si) =>
-          strDots.map(({fret, isRoot}) => {
-            const cx = fret===0 ? padX-16 : padX+(fret-.5)*FW;
-            return (
-              <circle key={`${si}-${fret}`} cx={cx} cy={padY+si*SH} r={7}
-                fill={isRoot?'#EF9F27':'#378ADD'} opacity={.88}/>
-            );
-          })
-        )}
+        {positions.map((strDots,si)=>strDots.map(({fret,isRoot})=>{
+          const cx=fret===0?padX-16:padX+(fret-.5)*FW;
+          return <circle key={`${si}-${fret}`} cx={cx} cy={padY+si*SH} r={7}
+            fill={isRoot?'#EF9F27':'#378ADD'} opacity={.88}/>;
+        }))}
       </svg>
+    </div>
+  );
+}
+
+/* ═══════════════════ ARPEGGIO ══════════════════════════════════ */
+
+const ARPEGGIO_INTERVALS = {
+  'maj':  [0,4,7],
+  'min':  [0,3,7],
+  'dim':  [0,3,6],
+  'dom7': [0,4,7,10],
+  'maj7': [0,4,7,11],
+  'min7': [0,3,7,10],
+  'hdim': [0,3,6,10],
+};
+const INTERVAL_COLORS = ['#EF9F27','#3B82F6','#22C55E','#A855F7'];
+const INTERVAL_SHORT  = ['R','3','5','7'];
+const INTERVAL_LONG   = ['Fondamentale','Tierce','Quinte','Septième'];
+
+/* Full fretboard */
+function ArpeggioFretboard({rootIdx, type}) {
+  const ivals    = ARPEGGIO_INTERVALS[type]||[0,4,7];
+  const arpNotes = useMemo(()=>ivals.map(i=>(rootIdx+i)%12),[rootIdx,type]);
+  const NF=14,FW=28,SH=16,pX=38,pY=12;
+  const W=pX+NF*FW+8, H=pY+5*SH+22;
+  const positions=STRING_TUNINGS.map(t=>
+    Array.from({length:NF+1},(_,fret)=>{
+      const note=(t+fret)%12, deg=arpNotes.indexOf(note);
+      return deg>=0?{fret,deg}:null;
+    }).filter(Boolean)
+  );
+  return (
+    <div style={{overflowX:'auto'}}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
+        {STRING_NAMES.map((n,s)=>(
+          <text key={s} x={8} y={pY+s*SH+4} textAnchor="middle" fontSize="7" fill="#888780">{n}</text>
+        ))}
+        <rect x={pX-3} y={pY} width={4} height={5*SH} fill="#B4B2A9" rx={1}/>
+        {Array.from({length:NF+1},(_,f)=>(
+          <line key={f} x1={pX+f*FW} y1={pY} x2={pX+f*FW} y2={pY+5*SH}
+            stroke={f===0?'#5F5E5A':'#2C2C2A'} strokeWidth={1}/>
+        ))}
+        {Array.from({length:6},(_,s)=>(
+          <line key={s} x1={pX} y1={pY+s*SH} x2={pX+NF*FW} y2={pY+s*SH}
+            stroke="#444441" strokeWidth={s===0||s===5?1.4:1}/>
+        ))}
+        {[3,5,7,9].filter(f=>f<=NF).map(f=>(
+          <circle key={f} cx={pX+(f-.5)*FW} cy={pY+2.5*SH} r={2} fill="#1e293b"/>
+        ))}
+        {NF>=12&&<><circle cx={pX+11.5*FW} cy={pY+1.5*SH} r={2} fill="#1e293b"/>
+          <circle cx={pX+11.5*FW} cy={pY+3.5*SH} r={2} fill="#1e293b"/></>}
+        {[3,5,7,9,12].filter(f=>f<=NF).map(f=>(
+          <text key={f} x={pX+(f-.5)*FW} y={pY+5*SH+16} textAnchor="middle" fontSize="7" fill="#5F5E5A">{f}</text>
+        ))}
+        {positions.map((sd,si)=>sd.map(({fret,deg})=>{
+          const cx=fret===0?pX-13:pX+(fret-.5)*FW, cy=pY+si*SH;
+          return (
+            <g key={`${si}-${fret}`}>
+              <circle cx={cx} cy={cy} r={6} fill={INTERVAL_COLORS[deg]} opacity={.92}/>
+              <text x={cx} y={cy+3} textAnchor="middle" fontSize="6" fill="#000" fontWeight="700">
+                {INTERVAL_SHORT[deg]}
+              </text>
+            </g>
+          );
+        }))}
+      </svg>
+    </div>
+  );
+}
+
+/* Box pattern — 5-fret window */
+function ArpeggioBox({rootIdx, type, startFret}) {
+  const ivals    = ARPEGGIO_INTERVALS[type]||[0,4,7];
+  const arpNotes = useMemo(()=>ivals.map(i=>(rootIdx+i)%12),[rootIdx,type]);
+  const NF=5,FW=32,SH=18,pX=32,pY=16;
+  const W=pX+NF*FW+8, H=pY+5*SH+20;
+  const positions=STRING_TUNINGS.map(t=>
+    Array.from({length:NF},(_,k)=>{
+      const note=(t+startFret+k)%12, deg=arpNotes.indexOf(note);
+      return deg>=0?{k,deg}:null;
+    }).filter(Boolean)
+  );
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:'block'}}>
+      {STRING_NAMES.map((n,s)=>(
+        <text key={s} x={9} y={pY+s*SH+4} textAnchor="middle" fontSize="7" fill="#888780">{n}</text>
+      ))}
+      {startFret===1
+        ? <rect x={pX-3} y={pY} width={3} height={5*SH} fill="#B4B2A9" rx={1}/>
+        : <text x={pX-2} y={pY-4} textAnchor="end" fontSize="8" fill="#5F5E5A">{startFret}fr</text>
+      }
+      {Array.from({length:NF+1},(_,f)=>(
+        <line key={f} x1={pX+f*FW} y1={pY} x2={pX+f*FW} y2={pY+5*SH}
+          stroke={f===0?'#5F5E5A':'#2C2C2A'} strokeWidth={1}/>
+      ))}
+      {Array.from({length:6},(_,s)=>(
+        <line key={s} x1={pX} y1={pY+s*SH} x2={pX+NF*FW} y2={pY+s*SH}
+          stroke="#444441" strokeWidth={s===0||s===5?1.4:1}/>
+      ))}
+      {Array.from({length:NF},(_,k)=>{
+        const fn=startFret+k;
+        return [3,5,7,9,12,15,17].includes(fn)
+          ? <circle key={k} cx={pX+(k+.5)*FW} cy={pY+2.5*SH} r={2.5} fill="#1e293b"/>
+          : null;
+      })}
+      {Array.from({length:NF},(_,k)=>(
+        <text key={k} x={pX+(k+.5)*FW} y={pY+5*SH+14} textAnchor="middle"
+          fontSize="7" fill="#334155">{startFret+k}</text>
+      ))}
+      {positions.map((sd,si)=>sd.map(({k,deg})=>{
+        const cx=pX+(k+.5)*FW, cy=pY+si*SH;
+        return (
+          <g key={`${si}-${k}`}>
+            <circle cx={cx} cy={cy} r={7} fill={INTERVAL_COLORS[deg]} opacity={.9}/>
+            <text x={cx} y={cy+3} textAnchor="middle" fontSize="7" fill="#000" fontWeight="700">
+              {INTERVAL_SHORT[deg]}
+            </text>
+          </g>
+        );
+      }))}
+    </svg>
+  );
+}
+
+/* Arpeggio Tab */
+function ArpeggioTab({keyNote}) {
+  const [selected, setSelected] = useState(0);
+  const [use7th,   setUse7th]   = useState(false);
+
+  const chordTypes  = use7th ? CHORD_TYPES_7TH  : CHORD_TYPES_TRIAD;
+  const degreeNames = use7th ? DEGREES_7TH       : DEGREES_TRIAD;
+  const keyChords   = useMemo(()=>
+    MAJOR_INTERVALS.map((interval,i)=>({
+      noteIdx:  (keyNote+interval)%12,
+      noteName: NOTES[(keyNote+interval)%12],
+      type:     chordTypes[i],
+      degree:   degreeNames[i],
+    }))
+  ,[keyNote,use7th]);
+
+  const chord = keyChords[selected];
+  const ivals = ARPEGGIO_INTERVALS[chord.type]||[0,4,7];
+
+  // Root fret per bass string — jump to octave if open
+  let rf6=(chord.noteIdx-STRING_TUNINGS[0]+12)%12; if(rf6===0) rf6=12;
+  let rf5=(chord.noteIdx-STRING_TUNINGS[1]+12)%12; if(rf5===0) rf5=12;
+  let rf4=(chord.noteIdx-STRING_TUNINGS[2]+12)%12; if(rf4===0) rf4=12;
+  const sf6=Math.max(1,rf6-1), sf5=Math.max(1,rf5-1), sf4=Math.max(1,rf4-1);
+
+  const BG='#0f172a',CARD='#1e293b',CARD2='#111827',BORDER='#334155';
+  const ACCENT='#EF9F27',MUTED='#888780',TEXT='#f1f5f9';
+  const sLabel={fontSize:9,color:MUTED,letterSpacing:'0.15em',textTransform:'uppercase',marginBottom:10};
+  const card={background:CARD,borderRadius:10,border:`1px solid ${BORDER}`,padding:'14px 18px'};
+  const toggle=active=>({
+    padding:'5px 16px',borderRadius:20,cursor:'pointer',fontFamily:'inherit',
+    border:`1px solid ${active?'#3b82f6':BORDER}`,
+    background:active?'rgba(59,130,246,.16)':'transparent',
+    color:active?'#60a5fa':MUTED,fontSize:12,transition:'all .15s',
+  });
+
+  return (
+    <div>
+      {/* 7th toggle */}
+      <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:18,
+        background:CARD2,borderRadius:20,border:`1px solid ${BORDER}`,
+        padding:'4px 8px',width:'fit-content'}}>
+        <span style={{fontSize:10,color:MUTED,marginRight:4}}>Accords</span>
+        <button onClick={()=>setUse7th(false)} style={toggle(!use7th)}>Triades</button>
+        <button onClick={()=>setUse7th(true)}  style={toggle(use7th)}>Accords de 7e</button>
+      </div>
+
+      {/* Chord selector */}
+      <div style={{marginBottom:18}}>
+        <div style={sLabel}>Sélectionne un accord diatonique</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:7}}>
+          {keyChords.map((c,i)=>{
+            const active=i===selected;
+            return (
+              <button key={i} onClick={()=>setSelected(i)} style={{
+                padding:'6px 12px',borderRadius:8,fontFamily:'inherit',
+                border:`1px solid ${active?ACCENT:BORDER}`,
+                background:active?ACCENT:'transparent',
+                color:active?BG:TEXT,fontWeight:active?700:400,
+                fontSize:13,transition:'all .15s',
+                display:'flex',flexDirection:'column',alignItems:'center',gap:1,
+              }}>
+                <span style={{fontSize:8,color:active?BG:MUTED}}>{c.degree}</span>
+                {chordLabel(c.noteName,c.type)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Info card */}
+      <div style={{...card,marginBottom:18}}>
+        <div style={sLabel}>Arpège sélectionné</div>
+        <div style={{fontSize:18,fontWeight:700,color:ACCENT,fontFamily:"Georgia,serif",marginBottom:6}}>
+          {chordLabel(chord.noteName,chord.type)}
+          <span style={{fontSize:12,fontWeight:400,color:MUTED,marginLeft:10}}>{chord.degree}</span>
+        </div>
+        <div style={{fontFamily:'monospace',fontSize:13,color:TEXT,marginBottom:12}}>
+          {ivals.map(i=>NOTES[(chord.noteIdx+i)%12]).join('  –  ')}
+        </div>
+        <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+          {ivals.map((_,i)=>(
+            <div key={i} style={{display:'flex',alignItems:'center',gap:5}}>
+              <div style={{width:10,height:10,borderRadius:'50%',background:INTERVAL_COLORS[i]}}/>
+              <span style={{fontSize:11,color:MUTED}}>{INTERVAL_SHORT[i]} = {INTERVAL_LONG[i]}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Full fretboard */}
+      <div style={sLabel}>Manche complet (14 frettes)</div>
+      <div style={{...card,padding:16,marginBottom:22}}>
+        <ArpeggioFretboard rootIdx={chord.noteIdx} type={chord.type}/>
+      </div>
+
+      {/* Box patterns */}
+      <div style={sLabel}>Box patterns — 3 positions</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:14,marginBottom:20}}>
+        {[
+          {sf:sf6, lbl:'Position E  (root corde 6)'},
+          {sf:sf5, lbl:'Position A  (root corde 5)'},
+          {sf:sf4, lbl:'Position D  (root corde 4)'},
+        ].map(({sf,lbl})=>(
+          <div key={lbl} style={{...card,padding:'12px 14px'}}>
+            <div style={{fontSize:10,color:MUTED,marginBottom:10,letterSpacing:'0.05em'}}>{lbl}</div>
+            <ArpeggioBox rootIdx={chord.noteIdx} type={chord.type} startFret={sf}/>
+          </div>
+        ))}
+      </div>
+
+      {/* Tip */}
+      <div style={{background:CARD2,borderRadius:8,border:`1px solid #1e293b`,padding:'13px 16px'}}>
+        <div style={sLabel}>Conseil de pratique</div>
+        <div style={{fontSize:12,color:MUTED,lineHeight:1.75}}>
+          Apprends chaque box pattern séparément avant de les relier sur le manche.
+          Dans une progression, essaie d'enchaîner les arpèges en restant dans la même zone —
+          cherche les notes communes ou proches entre deux accords consécutifs pour des transitions fluides.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════ METRONOME ════════════════════════════ */
+
+function MetronomeTab() {
+  const [bpm, setBpm]           = useState(80);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const [timeSig, setTimeSig]   = useState(4);
+  const [useClick, setUseClick] = useState(true);
+  const [pattern, setPattern]   = useState(BEATBOX_PRESETS['Rock']);
+  const [activePreset, setActivePreset] = useState('Rock');
+
+  // Audio engine refs
+  const ctxRef         = useRef(null);
+  const timerRef       = useRef(null);
+  const nextTimeRef    = useRef(0);
+  const stepRef        = useRef(0);
+  const visualRef      = useRef(-1);
+  const bpmRef         = useRef(bpm);
+  const timeSigRef     = useRef(timeSig);
+  const patternRef     = useRef(pattern);
+  const useClickRef    = useRef(useClick);
+  const tapsRef        = useRef([]);
+
+  useEffect(()=>{ bpmRef.current=bpm; },[bpm]);
+  useEffect(()=>{ timeSigRef.current=timeSig; },[timeSig]);
+  useEffect(()=>{ patternRef.current=pattern; },[pattern]);
+  useEffect(()=>{ useClickRef.current=useClick; },[useClick]);
+
+  // Visual sync at ~30fps
+  useEffect(()=>{
+    if(!isPlaying){ setCurrentStep(-1); return; }
+    const id=setInterval(()=>setCurrentStep(visualRef.current),30);
+    return ()=>clearInterval(id);
+  },[isPlaying]);
+
+  useEffect(()=>{
+    return ()=>{ clearTimeout(timerRef.current); };
+  },[]);
+
+  /* ── Sound synthesis ───────────────────────────────────────── */
+
+  function mkClick(ctx, time, accent) {
+    const o=ctx.createOscillator(), g=ctx.createGain();
+    o.frequency.value=accent?1000:600; o.type='sine';
+    g.gain.setValueAtTime(accent?.9:.55,time);
+    g.gain.exponentialRampToValueAtTime(.001,time+.04);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(time); o.stop(time+.05);
+  }
+
+  function mkKick(ctx, time) {
+    const o=ctx.createOscillator(), g=ctx.createGain();
+    o.frequency.setValueAtTime(180,time);
+    o.frequency.exponentialRampToValueAtTime(.01,time+.25);
+    g.gain.setValueAtTime(1.3,time);
+    g.gain.exponentialRampToValueAtTime(.001,time+.25);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(time); o.stop(time+.26);
+  }
+
+  function mkSnare(ctx, time) {
+    const sz=Math.floor(ctx.sampleRate*.12);
+    const buf=ctx.createBuffer(1,sz,ctx.sampleRate);
+    const d=buf.getChannelData(0);
+    for(let i=0;i<sz;i++) d[i]=Math.random()*2-1;
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const g=ctx.createGain(), f=ctx.createBiquadFilter();
+    f.type='bandpass'; f.frequency.value=3500; f.Q.value=.8;
+    g.gain.setValueAtTime(.7,time);
+    g.gain.exponentialRampToValueAtTime(.001,time+.12);
+    src.connect(f); f.connect(g); g.connect(ctx.destination);
+    src.start(time);
+  }
+
+  function mkHihat(ctx, time) {
+    const sz=Math.floor(ctx.sampleRate*.06);
+    const buf=ctx.createBuffer(1,sz,ctx.sampleRate);
+    const d=buf.getChannelData(0);
+    for(let i=0;i<sz;i++) d[i]=Math.random()*2-1;
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const g=ctx.createGain(), f=ctx.createBiquadFilter();
+    f.type='highpass'; f.frequency.value=9000;
+    g.gain.setValueAtTime(.38,time);
+    g.gain.exponentialRampToValueAtTime(.001,time+.065);
+    src.connect(f); f.connect(g); g.connect(ctx.destination);
+    src.start(time);
+  }
+
+  /* ── Scheduler ─────────────────────────────────────────────── */
+
+  function scheduleAhead() {
+    const ctx=ctxRef.current;
+    if(!ctx) return;
+    const totalSteps=timeSigRef.current*2;
+
+    while(nextTimeRef.current < ctx.currentTime+.12) {
+      const step=stepRef.current;
+      const t=nextTimeRef.current;
+      const isDown=step%2===0;
+      const beat=Math.floor(step/2);
+
+      if(useClickRef.current && isDown && beat<timeSigRef.current)
+        mkClick(ctx,t,beat===0);
+
+      if(step<8) {
+        const p=patternRef.current;
+        if(p.kick[step])  mkKick(ctx,t);
+        if(p.snare[step]) mkSnare(ctx,t);
+        if(p.hihat[step]) mkHihat(ctx,t);
+      }
+
+      const delay=Math.max(0,(t-ctx.currentTime)*1000);
+      setTimeout(()=>{ visualRef.current=step; }, delay);
+
+      nextTimeRef.current += 60/bpmRef.current/2;
+      stepRef.current=(step+1)%totalSteps;
+    }
+    timerRef.current=setTimeout(scheduleAhead,25);
+  }
+
+  function start() {
+    if(!ctxRef.current)
+      ctxRef.current=new (window.AudioContext||window.webkitAudioContext)();
+    const ctx=ctxRef.current;
+    if(ctx.state==='suspended') ctx.resume();
+    stepRef.current=0;
+    nextTimeRef.current=ctx.currentTime+.05;
+    scheduleAhead();
+    setIsPlaying(true);
+  }
+
+  function stop() {
+    clearTimeout(timerRef.current);
+    timerRef.current=null;
+    visualRef.current=-1;
+    setIsPlaying(false);
+  }
+
+  function handleTap() {
+    const now=Date.now();
+    // Reset if last tap was more than 3 seconds ago
+    if(tapsRef.current.length>0 && now-tapsRef.current[tapsRef.current.length-1]>3000)
+      tapsRef.current=[];
+    tapsRef.current.push(now);
+    if(tapsRef.current.length>8) tapsRef.current.shift();
+    if(tapsRef.current.length>=2) {
+      const diffs=[];
+      for(let i=1;i<tapsRef.current.length;i++)
+        diffs.push(tapsRef.current[i]-tapsRef.current[i-1]);
+      const avg=diffs.reduce((a,b)=>a+b)/diffs.length;
+      setBpm(Math.min(240,Math.max(40,Math.round(60000/avg))));
+    }
+  }
+
+  function toggleStep(row, step) {
+    setPattern(prev=>({...prev,[row]:prev[row].map((v,i)=>i===step?(v?0:1):v)}));
+    setActivePreset(null);
+  }
+
+  function applyPreset(name) {
+    setPattern({...BEATBOX_PRESETS[name]});
+    setActivePreset(name);
+  }
+
+  /* ── Styles ────────────────────────────────────────────────── */
+
+  const BG='#0f172a',CARD='#1e293b',CARD2='#111827',BORDER='#334155';
+  const ACCENT='#EF9F27',MUTED='#888780',TEXT='#f1f5f9';
+  const sLabel={fontSize:9,color:MUTED,letterSpacing:'0.15em',textTransform:'uppercase',marginBottom:10};
+  const card={background:CARD,borderRadius:10,border:`1px solid ${BORDER}`,padding:'16px 18px'};
+
+  const activeBeat=currentStep>=0?Math.floor(currentStep/2):-1;
+  const STEP_LABELS=['1','&','2','&','3','&','4','&'];
+
+  const ROW_COLORS={kick:'#D97706',snare:'#3B82F6',hihat:'#6B7280'};
+  const ROW_LABELS={kick:'Kick (grosse caisse)',snare:'Snare (caisse claire)',hihat:'Hi-Hat'};
+
+  return (
+    <div>
+      {/* ── BPM + Controls ───────────────────────────────────── */}
+      <div style={{...card,marginBottom:16}}>
+        <div style={{display:'flex',alignItems:'center',gap:20,flexWrap:'wrap'}}>
+
+          {/* BPM display */}
+          <div style={{textAlign:'center',minWidth:120}}>
+            <div style={{fontSize:52,fontWeight:700,color:ACCENT,lineHeight:1,fontVariantNumeric:'tabular-nums'}}>
+              {bpm}
+            </div>
+            <div style={{fontSize:11,color:MUTED,marginTop:2}}>BPM</div>
+          </div>
+
+          {/* Slider + nudge + tap */}
+          <div style={{flex:1,minWidth:200}}>
+            <input type="range" min={40} max={240} value={bpm}
+              onChange={e=>setBpm(Number(e.target.value))}
+              style={{width:'100%',marginBottom:12,accentColor:ACCENT}}/>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              <button onClick={()=>setBpm(b=>Math.max(40,b-1))} style={{
+                padding:'6px 14px',borderRadius:8,border:`1px solid ${BORDER}`,
+                background:'transparent',color:TEXT,fontSize:16,fontFamily:'inherit'}}>−</button>
+              <button onClick={()=>setBpm(b=>Math.min(240,b+1))} style={{
+                padding:'6px 14px',borderRadius:8,border:`1px solid ${BORDER}`,
+                background:'transparent',color:TEXT,fontSize:16,fontFamily:'inherit'}}>+</button>
+              <button onClick={handleTap} style={{
+                padding:'6px 18px',borderRadius:8,fontFamily:'inherit',fontSize:12,
+                border:`1px solid ${BORDER}`,background:'transparent',color:MUTED,
+                letterSpacing:'0.05em'}}>
+                Tap tempo
+              </button>
+            </div>
+          </div>
+
+          {/* Time signature + click toggle */}
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            <div style={{display:'flex',gap:6}}>
+              {[2,3,4].map(n=>(
+                <button key={n} onClick={()=>setTimeSig(n)} style={{
+                  padding:'5px 12px',borderRadius:8,fontFamily:'inherit',fontSize:13,
+                  border:`1px solid ${timeSig===n?ACCENT:BORDER}`,
+                  background:timeSig===n?'rgba(239,159,39,.14)':'transparent',
+                  color:timeSig===n?ACCENT:MUTED,transition:'all .15s'}}>
+                  {n}/4
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setUseClick(v=>!v)} style={{
+              padding:'5px 14px',borderRadius:8,fontFamily:'inherit',fontSize:12,
+              border:`1px solid ${useClick?'#60a5fa':BORDER}`,
+              background:useClick?'rgba(59,130,246,.14)':'transparent',
+              color:useClick?'#60a5fa':MUTED,transition:'all .15s',textAlign:'left'}}>
+              {useClick?'✓':''} Click actif
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Beat indicator + Start/Stop ──────────────────────── */}
+      <div style={{display:'flex',alignItems:'center',gap:24,marginBottom:20,flexWrap:'wrap'}}>
+
+        {/* Beat dots */}
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          {Array.from({length:timeSig},(_,i)=>{
+            const active=activeBeat===i&&isPlaying;
+            const isFirst=i===0;
+            return (
+              <div key={i} style={{
+                width:active?44:36, height:active?44:36,
+                borderRadius:'50%',
+                background:active?(isFirst?ACCENT:'#60a5fa'):'transparent',
+                border:`2px solid ${active?(isFirst?ACCENT:'#60a5fa'):(isFirst?'#5F5E5A':'#334155')}`,
+                display:'flex',alignItems:'center',justifyContent:'center',
+                color:active?BG:MUTED, fontWeight:700, fontSize:14,
+                transition:'all .08s ease',
+              }}>{i+1}</div>
+            );
+          })}
+        </div>
+
+        {/* Start / Stop */}
+        <button
+          onClick={isPlaying?stop:start}
+          style={{
+            padding:'12px 36px',borderRadius:12,fontFamily:'inherit',
+            fontSize:15,fontWeight:700,letterSpacing:'0.05em',
+            border:'none',cursor:'pointer',transition:'all .15s',
+            background:isPlaying?'#EF4444':ACCENT,
+            color:isPlaying?'#fff':BG,
+            boxShadow:isPlaying?'0 0 20px rgba(239,68,68,.4)':'0 0 20px rgba(239,159,39,.3)',
+          }}>
+          {isPlaying?'⏹  STOP':'▶  DÉMARRER'}
+        </button>
+      </div>
+
+      {/* ── Beatbox ──────────────────────────────────────────── */}
+      <div style={{...card}}>
+        <div style={sLabel}>Beatbox</div>
+
+        {/* Presets */}
+        <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+          {Object.keys(BEATBOX_PRESETS).map(name=>(
+            <button key={name} onClick={()=>applyPreset(name)} style={{
+              padding:'4px 12px',borderRadius:16,fontFamily:'inherit',fontSize:12,
+              border:`1px solid ${activePreset===name?ACCENT:BORDER}`,
+              background:activePreset===name?'rgba(239,159,39,.14)':'transparent',
+              color:activePreset===name?ACCENT:MUTED,transition:'all .15s'}}>
+              {name}
+            </button>
+          ))}
+        </div>
+
+        {/* Grid */}
+        <div style={{overflowX:'auto'}}>
+          <div style={{minWidth:360}}>
+            {['kick','snare','hihat'].map(row=>(
+              <div key={row} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                <div style={{width:88,fontSize:11,color:ROW_COLORS[row],flexShrink:0,
+                  fontWeight:600,textAlign:'right',paddingRight:4}}>
+                  {ROW_LABELS[row].split(' ')[0]}
+                </div>
+                <div style={{display:'flex',gap:4}}>
+                  {pattern[row].map((active, step)=>{
+                    const isCurrent=currentStep===step&&isPlaying;
+                    const isOddBeat=Math.floor(step/2)%2===1;
+                    return (
+                      <button key={step} onClick={()=>toggleStep(row,step)} style={{
+                        width:36,height:32,borderRadius:6,border:'none',
+                        cursor:'pointer',transition:'all .08s',
+                        background: isCurrent
+                          ? (active?ROW_COLORS[row]:'rgba(255,255,255,.18)')
+                          : active
+                            ? ROW_COLORS[row]+'cc'
+                            : isOddBeat?'#1e293b':'#111827',
+                        boxShadow: isCurrent?`0 0 8px ${ROW_COLORS[row]}88`:'none',
+                        outline: isCurrent?`2px solid ${ROW_COLORS[row]}`:'none',
+                        outlineOffset:1,
+                      }}/>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            {/* Step labels */}
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <div style={{width:92,flexShrink:0}}/>
+              <div style={{display:'flex',gap:4}}>
+                {STEP_LABELS.map((lbl,i)=>(
+                  <div key={i} style={{
+                    width:36,textAlign:'center',fontSize:10,
+                    color:i%2===0?MUTED:'#334155',fontWeight:i%2===0?600:400,
+                    letterSpacing:'0.05em'}}>
+                    {lbl}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Hint */}
+        <div style={{marginTop:14,fontSize:11,color:'#334155'}}>
+          Clique sur les cases pour activer ou désactiver les sons. Les cases plus claires marquent les temps 2 et 4.
+        </div>
+      </div>
     </div>
   );
 }
@@ -338,170 +830,184 @@ function GuitarApp() {
   const chordTypes  = use7th ? CHORD_TYPES_7TH  : CHORD_TYPES_TRIAD;
   const degreeNames = use7th ? DEGREES_7TH       : DEGREES_TRIAD;
 
-  const keyChords = useMemo(() =>
-    MAJOR_INTERVALS.map((interval, i) => ({
-      noteIdx:  (key + interval) % 12,
-      noteName: NOTES[(key + interval) % 12],
+  const keyChords = useMemo(()=>
+    MAJOR_INTERVALS.map((interval,i)=>({
+      noteIdx:  (key+interval)%12,
+      noteName: NOTES[(key+interval)%12],
       type:     chordTypes[i],
       degree:   degreeNames[i],
     }))
-  , [key, use7th]);
+  ,[key,use7th]);
 
   const prog       = PROGRESSIONS[progIdx];
-  const progChords = prog.degrees.map(d => keyChords[d]);
+  const progChords = prog.degrees.map(d=>keyChords[d]);
 
-  // ── shared style helpers ──────────────────────────────────────
-  const pill = active => ({
-    padding:'5px 14px', borderRadius:20, cursor:'pointer', fontFamily:'inherit',
-    border:`1px solid ${active ? ACCENT : BORDER}`,
-    background: active ? 'rgba(239,159,39,.14)' : 'transparent',
-    color: active ? ACCENT : MUTED, fontSize:12, transition:'all .15s',
+  const pill = active=>({
+    padding:'5px 14px',borderRadius:20,cursor:'pointer',fontFamily:'inherit',
+    border:`1px solid ${active?ACCENT:BORDER}`,
+    background:active?'rgba(239,159,39,.14)':'transparent',
+    color:active?ACCENT:MUTED,fontSize:12,transition:'all .15s',
   });
-  const keyBtn = active => ({
-    padding:'5px 12px', borderRadius:7, cursor:'pointer', fontFamily:'inherit',
-    border:`1px solid ${active ? ACCENT : BORDER}`,
-    background: active ? ACCENT : 'transparent',
-    color: active ? BG : TEXT, fontWeight: active ? 700 : 400,
-    fontSize:14, transition:'all .15s',
+  const keyBtn = active=>({
+    padding:'5px 12px',borderRadius:7,cursor:'pointer',fontFamily:'inherit',
+    border:`1px solid ${active?ACCENT:BORDER}`,
+    background:active?ACCENT:'transparent',
+    color:active?BG:TEXT,fontWeight:active?700:400,fontSize:14,transition:'all .15s',
   });
-  const toggle = active => ({
-    padding:'5px 16px', borderRadius:20, cursor:'pointer', fontFamily:'inherit',
-    border:`1px solid ${active ? '#3b82f6' : BORDER}`,
-    background: active ? 'rgba(59,130,246,.16)' : 'transparent',
-    color: active ? '#60a5fa' : MUTED, fontSize:12, transition:'all .15s',
+  const toggle = active=>({
+    padding:'5px 16px',borderRadius:20,cursor:'pointer',fontFamily:'inherit',
+    border:`1px solid ${active?'#3b82f6':BORDER}`,
+    background:active?'rgba(59,130,246,.16)':'transparent',
+    color:active?'#60a5fa':MUTED,fontSize:12,transition:'all .15s',
   });
-  const sLabel = {fontSize:9, color:MUTED, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:10};
-  const card   = {background:CARD, borderRadius:10, border:`1px solid ${BORDER}`, padding:'14px 18px'};
+  const sLabel={fontSize:9,color:MUTED,letterSpacing:'0.15em',textTransform:'uppercase',marginBottom:10};
+  const card={background:CARD,borderRadius:10,border:`1px solid ${BORDER}`,padding:'14px 18px'};
+
+  const TABS = [
+    ['progressions',"Progressions d'accords"],
+    ['gammes','Gammes & solos'],
+    ['arpeges','Arpèges'],
+    ['metronome','Métronome'],
+  ];
 
   return (
-    <div style={{background:BG, minHeight:'100vh', color:TEXT, padding:'20px 16px',
-      fontFamily:"'Helvetica Neue',Arial,sans-serif", maxWidth:980, margin:'0 auto'}}>
+    <div style={{background:BG,minHeight:'100vh',color:TEXT,padding:'20px 16px',
+      fontFamily:"'Helvetica Neue',Arial,sans-serif",maxWidth:980,margin:'0 auto'}}>
 
       {/* ── Header ──────────────────────────────────────────── */}
-      <div style={{marginBottom:22, paddingBottom:14, borderBottom:`1px solid ${BORDER}`,
-        display:'flex', alignItems:'baseline', gap:12, flexWrap:'wrap'}}>
-        <h1 style={{fontSize:24, fontWeight:700, margin:0,
-          fontFamily:"Georgia,'Times New Roman',serif", color:ACCENT}}>🎸 Guitar Practice</h1>
-        <span style={{fontSize:13, color:MUTED}}>Progressions & gammes</span>
+      <div style={{marginBottom:22,paddingBottom:14,borderBottom:`1px solid ${BORDER}`,
+        display:'flex',alignItems:'baseline',gap:12,flexWrap:'wrap'}}>
+        <h1 style={{fontSize:24,fontWeight:700,margin:0,
+          fontFamily:"Georgia,'Times New Roman',serif",color:ACCENT}}>🎸 Guitar Practice</h1>
+        <span style={{fontSize:13,color:MUTED}}>Progressions, gammes, arpèges & métronome</span>
       </div>
 
-      {/* ── Key selector ────────────────────────────────────── */}
-      <div style={{marginBottom:20}}>
-        <div style={sLabel}>Tonalité</div>
-        <div style={{display:'flex', flexWrap:'wrap', gap:6}}>
-          {NOTES.map((n,i) => (
-            <button key={i} onClick={() => setKey(i)} style={keyBtn(i===key)}>{n}</button>
-          ))}
+      {/* ── Key selector (hidden on metronome tab) ───────────── */}
+      {tab!=='metronome' && (
+        <div style={{marginBottom:20}}>
+          <div style={sLabel}>Tonalité</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {NOTES.map((n,i)=>(
+              <button key={i} onClick={()=>setKey(i)} style={keyBtn(i===key)}>{n}</button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ── Tabs ────────────────────────────────────────────── */}
-      <div style={{display:'flex', borderBottom:`1px solid ${BORDER}`, marginBottom:22}}>
-        {[['progressions',"Progressions d'accords"],['gammes','Gammes & solos']].map(([id,label]) => (
-          <button key={id} onClick={() => setTab(id)} style={{
-            padding:'9px 20px', background:'none', border:'none', cursor:'pointer',
-            fontFamily:'inherit', fontSize:13, transition:'all .15s',
-            color: tab===id ? ACCENT : MUTED,
-            borderBottom: `2px solid ${tab===id ? ACCENT : 'transparent'}`,
+      <div style={{display:'flex',borderBottom:`1px solid ${BORDER}`,marginBottom:22}}>
+        {TABS.map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{
+            padding:'9px 20px',background:'none',border:'none',cursor:'pointer',
+            fontFamily:'inherit',fontSize:13,transition:'all .15s',
+            color:tab===id?ACCENT:MUTED,
+            borderBottom:`2px solid ${tab===id?ACCENT:'transparent'}`,
           }}>{label}</button>
         ))}
       </div>
 
-      {/* ══════════ PROGRESSIONS tab ══════════════════════════ */}
-      {tab === 'progressions' && (
+      {/* ══════════ PROGRESSIONS ══════════════════════════════ */}
+      <div style={{display:tab==='progressions'?'block':'none'}}>
         <div>
-          {/* Chord type toggle + progression picker */}
-          <div style={{display:'flex', flexWrap:'wrap', gap:10, alignItems:'center', marginBottom:18}}>
-            <div style={{display:'flex', gap:6, alignItems:'center',
-              background:CARD2, borderRadius:20, border:`1px solid ${BORDER}`, padding:'4px 8px'}}>
-              <span style={{fontSize:10, color:MUTED, marginRight:4}}>Accords</span>
-              <button onClick={() => setUse7th(false)} style={toggle(!use7th)}>Triades</button>
-              <button onClick={() => setUse7th(true)}  style={toggle(use7th)}>Accords de 7e</button>
+          <div style={{display:'flex',flexWrap:'wrap',gap:10,alignItems:'center',marginBottom:18}}>
+            <div style={{display:'flex',gap:6,alignItems:'center',
+              background:CARD2,borderRadius:20,border:`1px solid ${BORDER}`,padding:'4px 8px'}}>
+              <span style={{fontSize:10,color:MUTED,marginRight:4}}>Accords</span>
+              <button onClick={()=>setUse7th(false)} style={toggle(!use7th)}>Triades</button>
+              <button onClick={()=>setUse7th(true)}  style={toggle(use7th)}>Accords de 7e</button>
             </div>
-            <div style={{width:'1px', height:24, background:BORDER}}/>
-            {PROGRESSIONS.map((p,i) => (
-              <button key={i} onClick={() => setProgIdx(i)} style={pill(i===progIdx)}>{p.name}</button>
+            <div style={{width:'1px',height:24,background:BORDER}}/>
+            {PROGRESSIONS.map((p,i)=>(
+              <button key={i} onClick={()=>setProgIdx(i)} style={pill(i===progIdx)}>{p.name}</button>
             ))}
           </div>
 
-          {/* Summary card */}
-          <div style={{...card, marginBottom:24}}>
+          <div style={{...card,marginBottom:24}}>
             <div style={sLabel}>Progression — {NOTES[key]} majeur</div>
-            <div style={{fontFamily:'monospace', fontSize:16, color:TEXT, marginBottom:5}}>{prog.label}</div>
-            <div style={{fontFamily:'monospace', fontSize:15, color:ACCENT}}>
-              {progChords.map(c => chordLabel(c.noteName, c.type)).join('  –  ')}
+            <div style={{fontFamily:'monospace',fontSize:16,color:TEXT,marginBottom:5}}>{prog.label}</div>
+            <div style={{fontFamily:'monospace',fontSize:15,color:ACCENT}}>
+              {progChords.map(c=>chordLabel(c.noteName,c.type)).join('  –  ')}
             </div>
           </div>
 
-          {/* Voicing columns (3 positions per chord) */}
           <div style={sLabel}>Positions sur le manche — root en corde 6, 5 et 4</div>
-          <div style={{display:'flex', flexWrap:'wrap', gap:14, marginBottom:32}}>
-            {progChords.map((c, i) => (
-              <VoicingColumn key={i}
-                noteIdx={c.noteIdx} noteName={c.noteName}
+          <div style={{display:'flex',flexWrap:'wrap',gap:14,marginBottom:32}}>
+            {progChords.map((c,i)=>(
+              <VoicingColumn key={i} noteIdx={c.noteIdx} noteName={c.noteName}
                 type={c.type} degree={c.degree}/>
             ))}
           </div>
 
-          {/* All 7 diatonic chords (single voicing each) */}
           <div style={sLabel}>Tous les accords diatoniques de {NOTES[key]} majeur</div>
-          <div style={{display:'flex', flexWrap:'wrap', gap:10}}>
-            {keyChords.map((c, i) => {
-              const v = getShapeVoicing(c.noteIdx, c.type, 5); // shape 5 as default
+          <div style={{display:'flex',flexWrap:'wrap',gap:10}}>
+            {keyChords.map((c,i)=>{
+              const v=getShapeVoicing(c.noteIdx,c.type,5);
               return (
-                <div key={i} style={{background:CARD2, borderRadius:8, padding:'8px 6px',
-                  border:`1px solid #1e293b`, display:'flex', flexDirection:'column', alignItems:'center', gap:4}}>
-                  <div style={{fontSize:8, color:MUTED, letterSpacing:'0.08em'}}>{c.degree}</div>
-                  <ChordDiagram {...v} label={chordLabel(c.noteName, c.type)}/>
+                <div key={i} style={{background:CARD2,borderRadius:8,padding:'8px 6px',
+                  border:`1px solid #1e293b`,display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+                  <div style={{fontSize:8,color:MUTED,letterSpacing:'0.08em'}}>{c.degree}</div>
+                  <ChordDiagram {...v} label={chordLabel(c.noteName,c.type)}/>
                 </div>
               );
             })}
           </div>
         </div>
-      )}
+      </div>
 
-      {/* ══════════ GAMMES tab ════════════════════════════════ */}
-      {tab === 'gammes' && (
+      {/* ══════════ GAMMES ════════════════════════════════════ */}
+      <div style={{display:tab==='gammes'?'block':'none'}}>
         <div>
-          <div style={{display:'flex', flexWrap:'wrap', gap:8, marginBottom:18}}>
-            {Object.keys(SCALES).map(sc => (
-              <button key={sc} onClick={() => setScale(sc)} style={pill(sc===scale)}>{sc}</button>
+          <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:18}}>
+            {Object.keys(SCALES).map(sc=>(
+              <button key={sc} onClick={()=>setScale(sc)} style={pill(sc===scale)}>{sc}</button>
             ))}
           </div>
-
-          <div style={{...card, marginBottom:18}}>
+          <div style={{...card,marginBottom:18}}>
             <div style={sLabel}>Gamme sélectionnée</div>
-            <div style={{fontSize:17, color:TEXT, marginBottom:5}}>{NOTES[key]} {scale}</div>
-            <div style={{fontSize:12, color:MUTED, marginBottom:10}}>{SCALES[scale].desc}</div>
-            <div style={{fontFamily:'monospace', fontSize:13, color:ACCENT}}>
-              {SCALES[scale].intervals.map(i => NOTES[(key+i)%12]).join('  –  ')}
+            <div style={{fontSize:17,color:TEXT,marginBottom:5}}>{NOTES[key]} {scale}</div>
+            <div style={{fontSize:12,color:MUTED,marginBottom:10}}>{SCALES[scale].desc}</div>
+            <div style={{fontFamily:'monospace',fontSize:13,color:ACCENT}}>
+              {SCALES[scale].intervals.map(i=>NOTES[(key+i)%12]).join('  –  ')}
             </div>
           </div>
-
-          <div style={{display:'flex', gap:20, marginBottom:12, flexWrap:'wrap'}}>
-            {[['#EF9F27','Root (tonique)'],['#378ADD','Note de la gamme']].map(([color,label]) => (
-              <div key={label} style={{display:'flex', alignItems:'center', gap:7}}>
-                <div style={{width:11, height:11, borderRadius:'50%', background:color, flexShrink:0}}/>
-                <span style={{fontSize:12, color:MUTED}}>{label}</span>
+          <div style={{display:'flex',gap:20,marginBottom:12,flexWrap:'wrap'}}>
+            {[['#EF9F27','Root (tonique)'],['#378ADD','Note de la gamme']].map(([color,label])=>(
+              <div key={label} style={{display:'flex',alignItems:'center',gap:7}}>
+                <div style={{width:11,height:11,borderRadius:'50%',background:color,flexShrink:0}}/>
+                <span style={{fontSize:12,color:MUTED}}>{label}</span>
               </div>
             ))}
           </div>
-
-          <div style={{...card, padding:16}}>
+          <div style={{...card,padding:16,marginBottom:14}}>
             <ScaleDiagram rootIdx={key} intervals={SCALES[scale].intervals}/>
           </div>
-
-          <div style={{marginTop:14, background:CARD2, borderRadius:8,
-            border:`1px solid #1e293b`, padding:'13px 16px'}}>
+          <div style={{background:CARD2,borderRadius:8,border:`1px solid #1e293b`,padding:'13px 16px'}}>
             <div style={sLabel}>Conseil de pratique</div>
-            <div style={{fontSize:12, color:MUTED, lineHeight:1.75}}>
+            <div style={{fontSize:12,color:MUTED,lineHeight:1.75}}>
               Commence par apprendre un seul "box pattern" avant de connecter les positions.
               Les roots en orange sont tes points d'ancrage — commence et termine tes phrases
               sur ces notes pour donner de la cohérence à ton jeu.
             </div>
           </div>
         </div>
-      )}
+      </div>
+
+      {/* ══════════ MÉTRONOME ═════════════════════════════════ */}
+      <div style={{display:tab==='metronome'?'block':'none'}}>
+        <MetronomeTab/>
+      </div>
+
+      {/* ══════════ ARPÈGES ═══════════════════════════════════ */}
+      <div style={{display:tab==='arpeges'?'block':'none'}}>
+        <ArpeggioTab keyNote={key}/>
+      </div>
+
+      {/* ── Watermark ───────────────────────────────────────── */}
+      <div style={{marginTop:48,paddingTop:12,borderTop:'1px solid #1e293b',
+        textAlign:'center',fontSize:10,color:'#1e293b',letterSpacing:'0.22em',
+        userSelect:'none',fontVariantCaps:'small-caps'}}>
+        cylien 2026
+      </div>
     </div>
   );
 }
